@@ -1,3 +1,7 @@
+// Copyright 2020 Daniel Theophanes.
+// Use of this source code is governed by a zlib-style
+// license that can be found in the LICENSE file.
+
 package ftps
 
 import (
