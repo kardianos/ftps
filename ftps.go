@@ -44,8 +44,12 @@ func joinHostPort(host string, port int) string {
 
 // Dial a FTPS server and return a Client.
 func Dial(ctx context.Context, opt DialOptions) (*Client, error) {
+	port := opt.Port
+	if port <= 0 {
+		port = 990
+	}
 	dialer := &net.Dialer{}
-	conn, err := dialer.DialContext(ctx, "tcp", joinHostPort(opt.Host, opt.Port))
+	conn, err := dialer.DialContext(ctx, "tcp", joinHostPort(opt.Host, port))
 	if err != nil {
 		return nil, fmt.Errorf("ftps: network dial failed: %w", err)
 	}
