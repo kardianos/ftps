@@ -8,8 +8,10 @@ import (
 	"bytes"
 	"crypto/tls"
 	"net"
+	"net/url"
 	"os"
 	"path"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -18,6 +20,79 @@ import (
 	"github.com/spf13/afero/mem"
 	"golang.org/x/net/context"
 )
+
+func TestRemote(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second*10)
+	defer cancel()
+
+	const serverURL = "ftps://ELRCSV.Test10:B1*,arC!!'@ftp.health.state.nm.us:990"
+
+	if len(serverURL) == 0 {
+		t.Skip()
+	}
+
+	su, err := url.Parse(serverURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	port := 0
+	if p, err := strconv.ParseInt(su.Port(), 10, 32); err == nil {
+		port = int(p)
+	}
+	u, p := "", ""
+	if su.User != nil {
+		u = su.User.Username()
+		p, _ = su.User.Password()
+	}
+
+	c, err := Dial(ctx, DialOptions{
+		Host:     su.Hostname(),
+		Port:     port,
+		Username: u,
+		Passowrd: p,
+		TLSConfig: &tls.Config{
+			InsecureSkipVerify: true,
+		},
+		ExplicitTLS: false,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+
+	const (
+		f1Name    = "f1"
+		f1Content = "hello world"
+	)
+	if err = c.Upload(ctx, f1Name, strings.NewReader(f1Content)); err != nil {
+		t.Fatal(err)
+	}
+	defer c.RemoveFile(f1Name)
+
+	f1Buff := &bytes.Buffer{}
+	if err = c.Download(ctx, f1Name, f1Buff); err != nil {
+		t.Fatal(err)
+	}
+	if w, g := f1Content, f1Buff.String(); w != g {
+		t.Fatalf("want %q, got %q", w, g)
+	}
+
+	list, err := c.List(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, item := range list {
+		t.Log(item)
+	}
+	if g, w := len(list), 1; g != w {
+		t.Fatalf("got %d items, want %d", g, w)
+	}
+
+	err = c.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+}
 
 type testDriver struct {
 	l    net.Listener
@@ -180,8 +255,9 @@ func TestScript(t *testing.T) {
 	port := sl.Addr().(*net.TCPAddr).Port
 
 	c, err := Dial(ctx, DialOptions{
-		Host: "localhost",
-		Port: port,
+		Host:        "localhost",
+		Port:        port,
+		ExplicitTLS: true,
 		TLSConfig: &tls.Config{
 			InsecureSkipVerify: true,
 		},
