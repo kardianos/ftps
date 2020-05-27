@@ -35,6 +35,9 @@ type DialOptions struct {
 	Username string
 	Passowrd string
 
+	// If true, will connect un-encrypted, then upgrade to using AUTH TLS command.
+	ExplicitTLS bool
+
 	TLSConfig *tls.Config
 }
 
@@ -49,7 +52,8 @@ func Dial(ctx context.Context, opt DialOptions) (*Client, error) {
 		port = 990
 	}
 	dialer := &net.Dialer{}
-	conn, err := dialer.DialContext(ctx, "tcp", joinHostPort(opt.Host, port))
+	dialTo := joinHostPort(opt.Host, port)
+	conn, err := dialer.DialContext(ctx, "tcp", dialTo)
 	if err != nil {
 		return nil, fmt.Errorf("ftps: network dial failed: %w", err)
 	}
@@ -61,19 +65,20 @@ func Dial(ctx context.Context, opt DialOptions) (*Client, error) {
 
 	if err = client.setup(); err != nil {
 		client.plain.Close()
-		return nil, err
+		return nil, fmt.Errorf("ftps: connection setup failed: %w", err)
 	}
 	return client, nil
 }
 
 func (c *Client) setup() error {
-	c.tc = textproto.NewConn(c.plain)
-
-	if _, err := c.read(220); err != nil {
-		return err
-	}
-	if _, err := c.cmd(234, "AUTH TLS"); err != nil {
-		return err
+	if c.opt.ExplicitTLS {
+		c.tc = textproto.NewConn(c.plain)
+		if _, err := c.read(220); err != nil {
+			return fmt.Errorf("setup init read: %w", err)
+		}
+		if _, err := c.cmd(234, "AUTH TLS"); err != nil {
+			return err
+		}
 	}
 
 	c.secure = tls.Client(c.plain, c.opt.TLSConfig)
@@ -81,6 +86,12 @@ func (c *Client) setup() error {
 		return err
 	}
 	c.tc = textproto.NewConn(c.secure)
+
+	if !c.opt.ExplicitTLS {
+		if _, err := c.read(220); err != nil {
+			return fmt.Errorf("setup init read: %w", err)
+		}
+	}
 
 	if _, err := c.cmd(331, "USER %s", c.opt.Username); err != nil {
 		return err
@@ -291,36 +302,42 @@ func readLine(line string) (File, error) {
 func (c *Client) Upload(ctx context.Context, name string, r io.Reader) error {
 	data, err := c.data(ctx, 150, "STOR %s", name)
 	if err != nil {
-		return err
+		return fmt.Errorf("upload data: %w", err)
 	}
 	defer data.Close()
 
 	_, err = io.Copy(data, r)
 	if err != nil {
-		return err
+		return fmt.Errorf("upload copy: %w", err)
 	}
 
 	if err = data.Close(); err != nil {
-		return nil
+		return fmt.Errorf("upload close: %w", err)
 	}
 	_, err = c.read(226)
-	return err
+	if err != nil {
+		return fmt.Errorf("upload read: %w", err)
+	}
+	return nil
 }
 
 // Download the file name from the current working directory to the Writer.
 func (c *Client) Download(ctx context.Context, name string, w io.Writer) error {
 	data, err := c.data(ctx, 150, "RETR %s", name)
 	if err != nil {
-		return err
+		return fmt.Errorf("download data: %w", err)
 	}
 	defer data.Close()
 
 	_, err = io.Copy(w, data)
 	if err != nil {
-		return err
+		return fmt.Errorf("download copy: %w", err)
 	}
 	data.Close()
 
 	_, err = c.read(226)
-	return err
+	if err != nil {
+		return fmt.Errorf("download read: %w", err)
+	}
+	return nil
 }
