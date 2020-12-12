@@ -25,10 +25,10 @@ func TestRemote(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second*10)
 	defer cancel()
 
-	const serverURL = "ftps://***REMOVED***:990"
+	var serverURL = os.Getenv("SERVER_URL") // "ftps://username:password:hostname:990"
 
 	if len(serverURL) == 0 {
-		t.Skip()
+		t.Skip("Missing SERVER_URL to test remote")
 	}
 
 	su, err := url.Parse(serverURL)
