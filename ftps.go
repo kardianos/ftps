@@ -235,7 +235,7 @@ type File struct {
 
 // List the contents of the current working directory.
 func (c *Client) List(ctx context.Context) ([]File, error) {
-	data, err := c.data(ctx, 150, "LIST")
+	data, err := c.data(ctx, 1, "LIST") // 150
 	if err != nil {
 		return nil, fmt.Errorf("ftps: failed to List, unable to get data conn: %w", err)
 	}
@@ -263,7 +263,7 @@ func (c *Client) List(ctx context.Context) ([]File, error) {
 	}
 	data.Close()
 
-	_, err = c.read(226)
+	_, err = c.read(2) // 226
 	if err != nil {
 		return list, fmt.Errorf("ftps: List ack failed: %w", err)
 	}
@@ -300,7 +300,7 @@ func readLine(line string) (File, error) {
 
 // Upload the contents of Reader to the file name to the current working directory.
 func (c *Client) Upload(ctx context.Context, name string, r io.Reader) error {
-	data, err := c.data(ctx, 150, "STOR %s", name)
+	data, err := c.data(ctx, 1, "STOR %s", name) // 150
 	if err != nil {
 		return fmt.Errorf("upload data: %w", err)
 	}
@@ -314,7 +314,7 @@ func (c *Client) Upload(ctx context.Context, name string, r io.Reader) error {
 	if err = data.Close(); err != nil {
 		return fmt.Errorf("upload close: %w", err)
 	}
-	_, err = c.read(226)
+	_, err = c.read(2) // 226
 	if err != nil {
 		return fmt.Errorf("upload read: %w", err)
 	}
@@ -323,7 +323,7 @@ func (c *Client) Upload(ctx context.Context, name string, r io.Reader) error {
 
 // Download the file name from the current working directory to the Writer.
 func (c *Client) Download(ctx context.Context, name string, w io.Writer) error {
-	data, err := c.data(ctx, 150, "RETR %s", name)
+	data, err := c.data(ctx, 1, "RETR %s", name) // 150
 	if err != nil {
 		return fmt.Errorf("download data: %w", err)
 	}
@@ -335,7 +335,7 @@ func (c *Client) Download(ctx context.Context, name string, w io.Writer) error {
 	}
 	data.Close()
 
-	_, err = c.read(226)
+	_, err = c.read(2) // 226
 	if err != nil {
 		return fmt.Errorf("download read: %w", err)
 	}

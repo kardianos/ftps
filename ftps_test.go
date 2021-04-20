@@ -25,7 +25,7 @@ func TestRemote(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second*10)
 	defer cancel()
 
-	var serverURL = os.Getenv("SERVER_URL") // "ftps://username:password:hostname:990"
+	var serverURL = os.Getenv("SERVER_URL") // "ftps://username:password@hostname:990?explicit=bool"
 
 	if len(serverURL) == 0 {
 		t.Skip("Missing SERVER_URL to test remote")
@@ -44,6 +44,7 @@ func TestRemote(t *testing.T) {
 		u = su.User.Username()
 		p, _ = su.User.Password()
 	}
+	explicit, _ := strconv.ParseBool(su.Query().Get("explicit"))
 
 	c, err := Dial(ctx, DialOptions{
 		Host:     su.Hostname(),
@@ -53,7 +54,7 @@ func TestRemote(t *testing.T) {
 		TLSConfig: &tls.Config{
 			InsecureSkipVerify: true,
 		},
-		ExplicitTLS: false,
+		ExplicitTLS: explicit,
 	})
 	if err != nil {
 		t.Fatal(err)
