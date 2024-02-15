@@ -45,6 +45,7 @@ func TestRemote(t *testing.T) {
 		p, _ = su.User.Password()
 	}
 	explicit, _ := strconv.ParseBool(su.Query().Get("explicit"))
+	InsecureUnencrypted, _ := strconv.ParseBool(su.Query().Get("insecure-unencrypted"))
 
 	c, err := Dial(ctx, DialOptions{
 		Host:     su.Hostname(),
@@ -54,7 +55,8 @@ func TestRemote(t *testing.T) {
 		TLSConfig: &tls.Config{
 			InsecureSkipVerify: true,
 		},
-		ExplicitTLS: explicit,
+		ExplicitTLS:         explicit,
+		InsecureUnencrypted: InsecureUnencrypted,
 	})
 	if err != nil {
 		t.Fatal(err)
