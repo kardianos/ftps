@@ -15,6 +15,8 @@ import (
 	"net/textproto"
 	"strconv"
 	"strings"
+	"sync"
+	"time"
 	"unicode"
 )
 
@@ -26,6 +28,11 @@ type Client struct {
 	tc *textproto.Conn
 
 	opt DialOptions
+
+	cmdMu  sync.Mutex
+	cmdErr error
+	closed bool
+	close  chan struct{}
 }
 
 // DialOptions for the FTPS client.
@@ -40,6 +47,8 @@ type DialOptions struct {
 
 	// If true, will NOT attempt to encrypt.
 	InsecureUnencrypted bool
+
+	KeepAlive time.Duration
 
 	TLSConfig *tls.Config
 }
@@ -68,12 +77,17 @@ func Dial(ctx context.Context, opt DialOptions) (*Client, error) {
 	client := &Client{
 		plain: conn,
 		opt:   opt,
+		close: make(chan struct{}),
 	}
 
 	if err = client.setup(); err != nil {
 		client.plain.Close()
 		return nil, fmt.Errorf("ftps: connection setup failed: %w", err)
 	}
+	if opt.KeepAlive > 0 {
+		go client.asyncKeepAlive(opt.KeepAlive)
+	}
+
 	return client, nil
 }
 
@@ -132,6 +146,28 @@ func (c *Client) read(expectCode int) (string, error) {
 		return "", fmt.Errorf("failed to read code, got code %d and message %s: %w", gotCode, message, err)
 	}
 	return message, nil
+}
+
+func (c *Client) asyncKeepAlive(dur time.Duration) {
+	if dur <= 0 {
+		return
+	}
+	tick := time.NewTicker(dur)
+	defer tick.Stop()
+
+	for {
+		select {
+		case <-tick.C:
+			ctx, cancel := context.WithTimeout(context.Background(), dur/2)
+			err := c.noop(ctx)
+			cancel()
+			if err != nil {
+				return
+			}
+		case <-c.close:
+			return
+		}
+	}
 }
 
 func (c *Client) cmd(expectedCode int, cmd string, args ...interface{}) (string, error) {
@@ -197,53 +233,82 @@ func (c *Client) data(ctx context.Context, expectedCode int, cmd string, args ..
 
 // Close the FTPS client connection.
 func (c *Client) Close() error {
+	c.cmdMu.Lock()
+	cmdErr := c.cmdErr
+	if c.closed {
+		c.cmdMu.Unlock()
+		return cmdErr
+	}
+	c.closed = true
+	c.cmdMu.Unlock()
+
+	close(c.close)
+
 	_, qerr := c.cmd(221, "QUIT")
 	if c.secure != nil {
 		serr := c.secure.Close()
+		if cmdErr != nil {
+			return cmdErr
+		}
 		if serr != nil {
 			return serr
 		}
 		return qerr
 	}
 	c.plain.Close()
+	if cmdErr != nil {
+		return cmdErr
+	}
 	return qerr
 }
 
 // Getwd gets the current working directory.
 func (c *Client) Getwd() (dir string, err error) {
-	return c.cmd(257, "PWD")
+	err = c.run(func() error {
+		dir, err = c.cmd(257, "PWD")
+		return err
+	})
+	return dir, err
 }
 
 // Chdir changes the current working directory.
 func (c *Client) Chdir(dir string) error {
-	if _, err := c.cmd(250, "CWD %s", dir); err != nil {
-		return fmt.Errorf("ftps: Chdir failed: %w", err)
-	}
-	return nil
+	return c.run(func() error {
+		if _, err := c.cmd(250, "CWD %s", dir); err != nil {
+			return fmt.Errorf("ftps: Chdir failed: %w", err)
+		}
+		return nil
+	})
 }
 
 // Mkdir makes a new directory.
 func (c *Client) Mkdir(name string) error {
-	if _, err := c.cmd(257, "MKD %s", name); err != nil {
-		return fmt.Errorf("ftps: Mkdir failed: %w", err)
-	}
-	return nil
+	return c.run(func() error {
+		if _, err := c.cmd(257, "MKD %s", name); err != nil {
+			return fmt.Errorf("ftps: Mkdir failed: %w", err)
+		}
+		return nil
+	})
 }
 
 // RemoveFile removes a file.
 func (c *Client) RemoveFile(name string) error {
-	if _, err := c.cmd(250, "DELE %s", name); err != nil {
-		return fmt.Errorf("ftps: RemoveFile failed: %w", err)
-	}
-	return nil
+	return c.run(func() error {
+		if _, err := c.cmd(250, "DELE %s", name); err != nil {
+			return fmt.Errorf("ftps: RemoveFile failed: %w", err)
+		}
+		return nil
+	})
 }
 
 // RemoveDir removes a directory.
 func (c *Client) RemoveDir(name string) error {
-	if _, err := c.cmd(250, "RMD %s", name); err != nil {
-		return fmt.Errorf("ftps: RemoveDir failed: %w", err)
-	}
-	return nil
+	return c.run(func() error {
+		if _, err := c.cmd(250, "RMD %s", name); err != nil {
+			return fmt.Errorf("ftps: RemoveDir failed: %w", err)
+		}
+		return nil
+	})
 }
 
 // File of a directory list.
@@ -253,40 +318,41 @@ type File struct {
 
 // List the contents of the current working directory.
 func (c *Client) List(ctx context.Context) ([]File, error) {
-	data, err := c.data(ctx, 1, "LIST") // 150
-	if err != nil {
-		return nil, fmt.Errorf("ftps: failed to List, unable to get data conn: %w", err)
-	}
-	defer data.Close()
-
-	list := make([]File, 0, 3)
-
-	reader := bufio.NewReader(data)
-	for {
-		select {
-		default:
-		case <-ctx.Done():
-			return list, fmt.Errorf("ftps: List canceled: %w", ctx.Err())
-		}
-		line, err := reader.ReadString('\n')
-		if err == io.EOF {
-			break
-		}
-
-		f, err := readLine(line)
+	var list []File
+	rerr := c.run(func() error {
+		data, err := c.data(ctx, 1, "LIST") // 150
 		if err != nil {
-			return list, fmt.Errorf("ftps: List line parse: %w", err)
+			return fmt.Errorf("ftps: failed to List, unable to get data conn: %w", err)
 		}
-		list = append(list, f)
-	}
-	data.Close()
+		defer data.Close()
 
-	_, err = c.read(2) // 226
-	if err != nil {
-		return list, fmt.Errorf("ftps: List ack failed: %w", err)
-	}
+		reader := bufio.NewReader(data)
+		for {
+			select {
+			default:
+			case <-ctx.Done():
+				return fmt.Errorf("ftps: List canceled: %w", ctx.Err())
+			}
+			line, err := reader.ReadString('\n')
+			if err == io.EOF {
+				break
+			}
 
-	return list, nil
+			f, err := readLine(line)
+			if err != nil {
+				return fmt.Errorf("ftps: List line parse: %w", err)
+			}
+			list = append(list, f)
+		}
+		data.Close()
+
+		_, err = c.read(2) // 226
+		if err != nil {
+			return fmt.Errorf("ftps: List ack failed: %w", err)
+		}
+		return nil
+	})
+	return list, rerr
 }
 
 func readLine(line string) (File, error) {
@@ -316,46 +382,75 @@ func readLine(line string) (File, error) {
 	return f, nil
 }
 
+type runner func() error
+
+func (c *Client) run(f runner) error {
+	c.cmdMu.Lock()
+	defer c.cmdMu.Unlock()
+
+	cmdErr := c.cmdErr
+	if c.closed {
+		return cmdErr
+	}
+
+	err := f()
+	if err != nil {
+		c.cmdErr = err
+	}
+	return err
+}
+
+func (c *Client) noop(ctx context.Context) error {
+	return c.run(func() error {
+		_, err := c.cmd(200, "NOOP")
+		return err
+	})
+}
+
 // Upload the contents of Reader to the file name to the current working directory.
 func (c *Client) Upload(ctx context.Context, name string, r io.Reader) error {
-	data, err := c.data(ctx, 1, "STOR %s", name) // 150
-	if err != nil {
-		return fmt.Errorf("upload data: %w", err)
-	}
-	defer data.Close()
+	return c.run(func() error {
+		data, err := c.data(ctx, 1, "STOR %s", name) // 150
+		if err != nil {
+			return fmt.Errorf("upload data: %w", err)
+		}
+		defer data.Close()
 
-	_, err = io.Copy(data, r)
-	if err != nil {
-		return fmt.Errorf("upload copy: %w", err)
-	}
+		_, err = io.Copy(data, r)
+		if err != nil {
+			return fmt.Errorf("upload copy: %w", err)
+		}
 
-	if err = data.Close(); err != nil {
-		return fmt.Errorf("upload close: %w", err)
-	}
-	_, err = c.read(2) // 226
-	if err != nil {
-		return fmt.Errorf("upload read: %w", err)
-	}
-	return nil
+		if err = data.Close(); err != nil {
+			return fmt.Errorf("upload close: %w", err)
+		}
+		_, err = c.read(2) // 226
+		if err != nil {
+			return fmt.Errorf("upload read: %w", err)
+		}
+		return nil
+	})
 }
 
 // Download the file name from the current working directory to the Writer.
 func (c *Client) Download(ctx context.Context, name string, w io.Writer) error {
-	data, err := c.data(ctx, 1, "RETR %s", name) // 150
-	if err != nil {
-		return fmt.Errorf("download data: %w", err)
-	}
-	defer data.Close()
+	return c.run(func() error {
+		data, err := c.data(ctx, 1, "RETR %s", name) // 150
+		if err != nil {
+			return fmt.Errorf("download data: %w", err)
+		}
+		defer data.Close()
 
-	_, err = io.Copy(w, data)
-	if err != nil {
-		return fmt.Errorf("download copy: %w", err)
-	}
-	data.Close()
+		_, err = io.Copy(w, data)
+		if err != nil {
+			return fmt.Errorf("download copy: %w", err)
+		}
+		data.Close()
 
-	_, err = c.read(2) // 226
-	if err != nil {
-		return fmt.Errorf("download read: %w", err)
-	}
-	return nil
+		_, err = c.read(2) // 226
+		if err != nil {
+			return fmt.Errorf("download read: %w", err)
+		}
+		return nil
+	})
 }
